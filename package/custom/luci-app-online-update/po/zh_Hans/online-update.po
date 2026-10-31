@@ -201,3 +201,6 @@ msgstr "无法开始下载：%s"
 
 msgid "unknown error"
 msgstr "未知错误"
+
+msgid "Cancel update"
+msgstr "取消更新"

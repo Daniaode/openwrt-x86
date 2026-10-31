@@ -276,12 +276,14 @@ fetch_asset() {
 	) &
 	local mon=$!
 
-	# --connect-timeout bounds a hanging proxy: without it curl waits two
-	# minutes on a stalled handshake while the UI sits at 0% with no error.
+	# --connect-timeout bounds a hanging proxy, but must be generous: a busy
+	# proxy (ghfast at off-peak hours) can take far longer than 20 s to accept
+	# the connection. 20 s killed the download outright; 60 s still bounds an
+	# endless handshake without cutting off a merely slow one.
 	# --speed-limit/--speed-time abandon a transfer that has effectively
 	# stalled, instead of holding the lock for the full --max-time.
 	curl -fsS -L \
-		--connect-timeout 20 \
+		--connect-timeout 60 \
 		--speed-limit 1024 --speed-time 120 \
 		--max-time 1800 \
 		-o "$out" "$url"
@@ -569,6 +571,43 @@ cmd_cleanup() {
 	echo "RESULT=ok"
 }
 
+# Forcibly stop an in-flight download and remove every trace of it.
+#
+# This is deliberately different from cleanup: cleanup refuses while a worker
+# holds the lock (to protect a live download from having its output unlinked),
+# whereas cancel is the user's explicit "stop this" and must tear the whole
+# thing down. The worker is launched with setsid, so it is both session leader
+# and process-group leader; the progress monitor subshell and curl inherit that
+# group, so killing the group ends the download, not just the shell wrapper.
+cmd_cancel() {
+	local pid i
+
+	pid=$(cat "$LOCK/pid" 2>/dev/null)
+	if [ -n "$pid" ] && [ -d "/proc/$pid" ]; then
+		kill -9 -- "-$pid" 2>/dev/null || kill -9 "$pid" 2>/dev/null
+	fi
+
+	# Belt and braces: sweep any stragglers that outlived the group kill.
+	for i in $(pgrep -f 'online-update download' 2>/dev/null); do
+		[ "$i" = "$$" ] && continue
+		kill -9 "$i" 2>/dev/null
+	done
+	for i in $(pgrep -f 'curl -fsS -L' 2>/dev/null); do
+		kill -9 "$i" 2>/dev/null
+	done
+
+	sleep 1
+
+	rm -rf "$LOCK" 2>/dev/null
+	rm -f "$JOB" "$JOB.tmp" "$PROG" "$PROG.tmp" 2>/dev/null
+	rm -f "$DL_DIR"/.firmware.*.part "$DL_DIR"/.download-finished.* 2>/dev/null
+	rm -f "$DL_DIR/firmware.img.gz" "$DL_DIR/SHA256SUMS" 2>/dev/null
+
+	log "download cancelled by user"
+	echo "RESULT=cancelled"
+	echo "STATE=IDLE"
+}
+
 # Test seam: with ONLINE_UPDATE_NO_MAIN set the file only defines functions, so
 # a test can `. ./online-update` and exercise the real fsize/prog_write/
 # fetch_asset/proxied_url instead of a reimplementation that could drift.
@@ -583,6 +622,7 @@ case "$1" in
 	jobstatus) cmd_jobstatus ;;
 	apply)     cmd_apply ;;
 	cleanup)   cmd_cleanup ;;
+	cancel)    cmd_cancel ;;
 	*) echo "Usage: $0 {status|check|ignore <tag>|unignore <tag>|start|download|jobstatus|apply|cleanup}" >&2; exit 2 ;;
 esac
 fi

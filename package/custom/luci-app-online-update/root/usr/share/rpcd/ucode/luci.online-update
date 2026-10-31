@@ -9,7 +9,7 @@ const HELPER = '/usr/sbin/online-update';
 /* Only these verbs may be invoked from LuCI. Anything else is refused.
  *
  * This table must stay in sync with the verbs the frontend actually calls:
- *   status check jobstatus start apply cleanup ignore unignore
+ *   status check jobstatus start cancel apply cleanup ignore unignore
  * `download` is deliberately listed too, even though only the detached
  * worker calls it, so a future frontend change does not have to touch this
  * file. tests/check-verbs.sh enforces the sync at build time.
@@ -22,6 +22,7 @@ const ALLOWED = {
 	check:     { args: 0 },
 	jobstatus: { args: 0 },
 	start:     { args: 0 },
+	cancel:    { args: 0 },
 	apply:     { args: 0 },
 	cleanup:   { args: 0 },
 	download:  { args: 0 },

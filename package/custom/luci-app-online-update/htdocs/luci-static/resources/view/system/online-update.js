@@ -206,11 +206,17 @@ return view.extend({
 		if (!job.STATE || job.STATE === 'IDLE')
 			return E('div', { 'id': 'ou-progress' });
 
+		var view = this;
 		var pct = parseInt(job.PERCENT, 10);
 		if (isNaN(pct)) pct = 0;
 
 		var stage = stageLabel(job.STATE);
 		var detail = this.progressDetail(job);
+
+		// Checking, downloading and verifying can be interrupted. APPLYING is
+		// already writing the image and can no longer be stopped.
+		var cancellable = (job.STATE === 'CHECKING' ||
+			job.STATE === 'DOWNLOADING' || job.STATE === 'VERIFYING');
 
 		return E('div', { 'class': 'cbi-section', 'id': 'ou-progress' }, [
 			E('h3', {}, _('Status')),
@@ -229,7 +235,13 @@ return view.extend({
 			job.TAG ? E('p', {}, _('Release: %s').format(job.TAG)) : E('span'),
 			(job.REASON && job.STATE === 'ERROR')
 				? E('p', {}, _('Reason: %s').format(job.REASON))
-				: E('span')
+				: E('span'),
+			cancellable ? E('div', { 'style': 'margin-top:10px' }, [
+				E('button', {
+					'class': 'cbi-button cbi-button-reset',
+					'click': ui.createHandlerFn(view, 'handleCancel')
+				}, _('Cancel update'))
+			]) : E('span')
 		]);
 	},
 
@@ -370,6 +382,13 @@ return view.extend({
 	handleDiscard: function(ev) {
 		ev.preventDefault();
 		return run('cleanup').then(function() {
+			window.location.reload();
+		});
+	},
+
+	handleCancel: function(ev) {
+		ev.preventDefault();
+		return run('cancel').then(function() {
 			window.location.reload();
 		});
 	},

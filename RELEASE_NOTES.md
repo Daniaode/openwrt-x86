@@ -1,149 +1,98 @@
-# v17 — 修复透明网桥在页面开启后不生效
+# v18 — 在线更新新增取消按钮，修复下载超时误判
 
 **此版本取代全部历史版本。**
 
-版本标识：`r8201-0185dc581`，baked tag `v17-20261031`，内核 `6.18.58`，575 包。
+版本标识：`r8201-0185dc581`，baked tag `v18-20261101`，内核 `6.18.58`，575 包。
 
 ---
 
-## 一、问题
+## 一、新增：取消更新按钮
 
-在 LuCI 的 `网络 → 透明网桥` 页面勾选启用、保存应用后，配置写进去了，但**网桥从未建立**。页面看不到任何报错，开关看起来"开了"，实际什么也没发生。
+### 需求
 
----
+下载/校验过程中，界面一直显示进度条，无法打断。新增「取消更新」按钮。
 
-## 二、三个根因，缺一不可
+### 实现
 
-### 1. init 脚本没有执行位
+三处改动：
 
-```
--rw-r--r--  /etc/init.d/bridge
-$ /etc/init.d/bridge start
-→ Permission denied
-```
-
-页面只负责把 `enabled` 写入 `/etc/config/bridge`，真正干活的是这个 init 脚本。脚本不可执行，触发时直接被拒绝。
-
-`luci.mk` 用 `cp -pR ./root` 安装，权限位原样保留，所以源文件是 644，装进固件还是 644。
-
-### 2. 触发机制用错了
-
-这个固件用**新版 ucitrack**：`/usr/share/ucitrack/*.json`。原包的 `uci-defaults` 写的是老式 `/etc/config/ucitrack` 条目——这个系统**根本不维护那个文件**，写进去毫无作用。
-
-对照：`/usr/share/ucitrack/` 下已有 14 个 json（firewall、upnp、openclash 等），没有 bridge 的那一份。
-
-`register_init` 的条件是「可执行 + enabled + 非 procd」，三条都满足，只缺这个 json。
-
-### 3. CBI 表单缺少保存回调
-
-即使前两条修好，还有一个时机问题：`uci commit` 本身**不会**发出 `config.change` 事件，只有 LuCI 的 apply 路径才会。原页面没有任何 `on_after_commit`，所以保存后没人去调用 init 脚本。
-
----
-
-## 三、修复
-
-| 项 | 改动 |
+| 层 | 改动 |
 |---|---|
-| 权限位 | `chmod 755`，并在 Makefile 里加解析期 `$(error)` 守卫 |
-| 触发机制 | 新增 `root/usr/share/ucitrack/luci-app-bridge.json` |
-| 保存回调 | CBI 增加 `on_after_commit`，后台调用 `init.d/bridge reload` |
+| 后端 | `cmd_cancel`：杀掉下载进程组 + curl，清理锁、状态、临时分片 |
+| rpcd | `ALLOWED` 增加 `cancel: { args: 0 }` |
+| 前端 | 进度区在 CHECKING / DOWNLOADING / VERIFYING 阶段显示「取消更新」按钮 |
 
-`on_after_commit` 里用后台调用而非同步：启用会重编管理地址并 reload 网络，同步调用会把 HTTP 请求挂到浏览器连接断掉为止。
+关键设计：
 
-守卫为什么放在**解析期**而不是 `Build/Compile`：实测 `Build/Compile` 对这个包根本不执行（插入探针，编译成功但命中 0 次），放那里等于装饰。`$(error)` 在 Makefile 解析时必定触发。
+- **进程组 kill**：下载 worker 由 `setsid` 启动，是会话组长也是进程组组长，进度监控子 shell 和 curl 都继承该组。`kill -9 -- -$pid` 一次性终结整条下载链，而不是只杀 shell 外壳。
+- **与 cleanup 区分**：`cleanup` 在有活锁时拒绝（保护活下载不被 unlink 输出文件），`cancel` 是用户明确的「停止」，必须强拆。
+- **APPLYING 阶段不可取消**：镜像已开始写入，取消没有意义且危险。
 
-实测拦截：
+### 实测
 
 ```
-正常状态                      → 可解析，编译继续
-chmod 644 init.d/bridge       → ERROR: ... is not executable
-移走 ucitrack json            → ERROR: missing ... json
+PASS  cancel 终止 worker（3 → 0）
+PASS  cancel 终止 curl（0）
+PASS  锁清理、job 清理
+PASS  cancel 后可重新 start
 ```
 
 ---
 
-## 四、顺带修掉 3 个副作用缺陷
+## 二、修复：下载超时误判
 
-### 1. 清空防火墙配置
+### 问题
 
-原脚本：
+凌晨等非高峰时段，ghfast 代理连接建立超过 20 秒，`--connect-timeout 20` 直接把下载判成超时失败：
 
-```sh
-cat /dev/null > /etc/config/firewall
+```
+03:09:44 downloading v17-r8202/... (proxy=https://ghfast.top/)
+03:10:05 job failed: the download stalled or timed out (timeout)
 ```
 
-然后只重建一个 zone。实测把 **183 行 / 2 个 zone 的防火墙配置删成 10 行 / 1 个 zone**，用户的端口转发、自定义规则全部丢失。
+而实际上代理是通的，只是慢——1MB range 探测 3 秒就成功（341 KB/s）。
 
-现在保留原配置，只在缺失时补一个 bridge zone。理由：网桥流量是二层转发，由内核 bridge 处理，**根本不经过这些 zone**，清空没有任何收益。
+### 修复
 
-### 2. `break` 用在循环外
+`--connect-timeout 20` → `--connect-timeout 60`。
 
-```sh
-if [ ... ]; then
-	break;      # 不在 for/while 内，ash 下是无效语句
+理由：`--connect-timeout` 只约束 TCP 连接建立阶段。繁忙代理在非高峰时段接受连接可能远超 20 秒，20 秒会误杀「只是慢」的正常下载。60 秒仍然约束无休止的握手，但不会切断慢连接。
+
+真正的「卡住」检测由 `--speed-limit 1024 --speed-time 120` 承担（连接建立后 120 秒无数据才中断），这才是防止永久卡住的正确机制。
+
+### 实测
+
 ```
-
-这使"防重复配置"的判断完全失效，每次 reload 都重写 network/firewall 并重启网络。改用 `param` 文件记录上次应用的参数做幂等判断。
-
-### 3. 状态指示灯判据过时
-
-原代码：
-
-```lua
-e.running = luci.sys.call("iptables -L INPUT | grep zone_.*input | grep bridge")==0
+t=4s  BYTES=131000    PCT=0  SPD=131000
+t=6s  BYTES=30407280  PCT=15 SPD=15138140
+t=30s BYTES=91486832  PCT=46 SPD=1856853
+→ 进度递增，速度稳定 1.5~15 MB/s
 ```
-
-本固件是 **fw4 / nftables**（`nft list ruleset` 有 `table inet fw4`），没有那种 iptables 规则名。即使网桥完全正常，页面也一直显示"未运行"。
-
-改为查 `/sys/class/net/br-bridge/brif` 的成员数——直接问内核，与防火墙后端无关。
 
 ---
 
-## 五、另一处连带修复：改写 network 导致 DNS 失效
+## 三、验证
 
-原脚本清空 `/etc/config/network` 后只重建 bridge 接口，但不碰 `/etc/config/dhcp`。结果 dnsmasq 仍然绑定已删除的 `lan` / `wan`：
+全新 VM（172.16.99.82）13 项全过：
 
 ```
-dhcp.lan.interface='lan'   → network.lan 已不存在
-dhcp.wan.interface='wan'   → network.wan 已不存在
+PASS  镜像身份 R26.11.1 / v18-20261101 / 1.1.0-r2
+PASS  cancel 三处就位（helper / rpcd / 前端）
+PASS  前端进度条 + 详情代码就位
+PASS  网络自检（网关 / DNS，nft 225 条）
+PASS  check available（降 tag 触发真实更新）
+PASS  start 正常
+PASS  下载进度递增（0 → 91 MB，46%）
+PASS  cancel 终止 worker + curl
+PASS  锁清理、job 清理
+PASS  cancel 后可重新 start
+
+SUMMARY pass=*** fail=0   RESULT=PASS
 ```
-
-实测现象：网桥建起来了，`172.16.99.25/24` 也拿到了，但**域名解析全部失败**——因为 dnsmasq 的上游来自 `wan` 接口的 `resolv.conf.auto`，而那个接口没了。
-
-现在同步清理 dhcp 里指向已删接口的段，新增 `dhcp.bridge`（`ignore='1'`，客户端仍由上游路由器分配地址），并显式指定上游 DNS。
 
 ---
 
-## 六、验证：全新烧写，走页面保存路径
-
-在全新 v17 镜像的 VM 上，模拟"页面保存"（写 uci + commit + `config.change` 事件）：
-
-```
-PASS  init.d/bridge 可执行（原为 644）
-PASS  ucitrack json 存在（触发机制）
-PASS  cbi 有 on_after_commit
-
-PASS  页面保存后建出网桥
-PASS  init 脚本确实被执行（0 → 1 次）
-PASS  网桥成员口 [eth0 eth1]
-PASS  管理 IP 在网桥上（172.16.99.25）
-PASS  上游网关可达
-PASS  DNS 正常
-PASS  防火墙 zone 未被删除（2 → 3）
-PASS  防火墙规则未被清空（184 → 191）
-
-PASS  关闭后网桥移除
-PASS  LAN 已还原
-PASS  还原后 DNS 正常
-
-SUMMARY pass=15 fail=0   RESULT=PASS
-```
-
-另在既有设备上跑了三段验证（禁用 → 启用 → 禁用），同样 14/14 通过。
-
----
-
-## 七、镜像
+## 四、镜像
 
 | 文件 | 大小 |
 |---|---|
@@ -159,7 +108,7 @@ SUMMARY pass=15 fail=0   RESULT=PASS
 
 ---
 
-## 八、升级
+## 五、升级
 
 ```sh
 sysupgrade -v /tmp/openwrt-x86-64-generic-squashfs-combined.img.gz
@@ -167,19 +116,20 @@ sysupgrade -v /tmp/openwrt-x86-64-generic-squashfs-combined.img.gz
 
 或在本版固件内用 `系统 → 在线更新`。
 
+> **注意**：v15 及更早版本升级到本版时，「在线更新」页面的进度条和取消按钮才会生效。v15 点「开始下载」会转圈是因为旧版 rpcd 白名单缺 `start` 动词，已在 v16 修复。
+
 登录：`root` / `password`，**首启后立即 `passwd` 修改**。
 
 ---
 
-## 九、已知限制
+## 六、已知限制
 
-- 启用透明网桥后，路由器的多拨、全锥 NAT 等功能不再适用（网桥是二层设备，不做三层处理）
-- 管理地址必须与上游同网段且不冲突；填错会导致 Web 界面失联，需通过控制台改回
-- `hk-gh-proxy` 下载通道在虚拟化环境下极慢（实测 0.09 MB/s），界面已标注
+- `hk-gh-proxy` 通道在虚拟化环境下极慢（实测 0.09 MB/s），界面已标注
+- 下载代理的完整性依赖 SHA256 校验，未加 GPG 签名
 - 测试环境无运营商 IPv6 上游，IPv6 端到端连通性仍无法实测
 
 ---
 
-## 十、许可
+## 七、许可
 
 构建脚本与配置以 MIT 发布。固件内各软件包版权归原作者，LEDE 主源码遵循 GPL-2.0。
