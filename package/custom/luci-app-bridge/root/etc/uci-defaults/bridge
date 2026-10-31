@@ -1,11 +1,15 @@
 #!/bin/sh
-
-uci -q batch <<-EOF >/dev/null
-	delete ucitrack.@bridge[-1]
-	add ucitrack bridge
-	set ucitrack.@bridge[-1].init=bridge
-	commit ucitrack
-EOF
+# First-boot housekeeping for the transparent bridge page.
+#
+# The trigger that runs /etc/init.d/bridge after the form is saved comes from
+# /usr/share/ucitrack/luci-app-bridge.json, which ships as a static file in
+# this package. Nothing is registered here, because this firmware reads the
+# JSON form under /usr/share/ucitrack and no longer maintains the legacy
+# /etc/config/ucitrack entries -- writing those had no effect at all.
+#
+# Only the LuCI caches need clearing after install.
 
 rm -f /tmp/luci-indexcache
+rm -rf /tmp/luci-modulecache
+
 exit 0

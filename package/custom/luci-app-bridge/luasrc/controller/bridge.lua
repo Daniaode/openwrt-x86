@@ -13,8 +13,14 @@ function index()
 end
 
 function act_status()
-  local e={}
-  e.running=luci.sys.call("iptables -L INPUT | grep zone_.*input | grep bridge >/dev/null")==0
-  luci.http.prepare_content("application/json")
-  luci.http.write_json(e)
+	local e = {}
+	-- Ask the kernel what is actually bridged. The old check grepped iptables
+	-- for a zone name, which reports "not running" on fw4/nftables images even
+	-- when the bridge is up, and would also stay green if the zone existed but
+	-- the bridge did not.
+	local n = tonumber(luci.sys.exec("ls /sys/class/net/br-bridge/brif 2>/dev/null | wc -l")) or 0
+	e.running = (n > 0)
+	e.ports = n
+	luci.http.prepare_content("application/json")
+	luci.http.write_json(e)
 end

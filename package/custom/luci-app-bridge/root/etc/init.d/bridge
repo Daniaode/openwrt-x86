@@ -1,124 +1,173 @@
 #!/bin/sh /etc/rc.common
+# Transparent bridge.
+#
+# Turns this router into a layer-2 bridge between its physical ports, so
+# clients behind it keep the upstream router's subnet, gateway and NAT. The
+# device keeps a single management IP on the bridge itself.
+#
+# Rewriting /etc/config/network makes every interface the vendor image defined
+# disappear, so /etc/config/dhcp has to be adjusted in the same pass: dnsmasq
+# binds per interface and takes its upstream from the interface that used to
+# be 'wan'. Shipping the old dhcp config left the bridge up but DNS dead, which
+# looks exactly like "the switch did nothing useful".
 
 START=99
 
-run_bridge()
-{
-	config_get enabled $1 enabled
-	config_get gateway $1 gateway
-	config_get ipaddr $1 ipaddr
-	config_get netmask $1 netmask
-	config_get network $1 network
+BACKUP=/etc/bridge
 
-	ipv6=$(uci get network.globals.ula_prefix)
-	if=$(cat /etc/config/network | wc -l)
-
-	if [ "$enabled" = "1" ]; then
-
-	#防止重复配置
-	a=$(uci get network.bridge.ifname | sed 's/ /\n/g' |wc -l)
-	b=$(uci get network.bridge.ipaddr)
-	c=$(uci get network.bridge.netmask)
-	d=$(uci get network.bridge.gateway)
-	e=$(ls /sys/class/net | grep "eth" | wc -l)
-
-	if [ "$a" = "$network" ] || [ "$a" = "$e" ] && [ "$network" = "" ] || [ "$a" = "$network" ]; then
-	f=yes
-	else
-	f=no
-	fi
-
-	if [ "$b" = "$ipaddr" ] && [ "$c" = "$netmask" ] && [ "$d" = "$gateway" ] && [ "$f" = "yes" ]; then
-	break;
-	else
-
-	#模拟输入
-	if [ "$network" = "0" ] || [ "$network" = "" ]; then
-	eth=$(ls /sys/class/net | grep "eth" | tr '\n' ' ' | sed 's/[ ]*$//g')
-	else
-	eth=$(ETH $network | tr '\n' ' ' | sed 's/[ ]*$//g')
-	fi
-
-	#备份配置
-	if [ ! -f "/etc/bridge/firewall" ]; then
-	mkdir /etc/bridge
-	cp /etc/config/network /etc/bridge/network
-	cp /etc/config/firewall /etc/bridge/firewall
-
-	fi
-
-	#清空配置
-	cat /dev/null> /etc/config/network
-	cat /dev/null> /etc/config/firewall
-
-	#写入network网络接口
-	uci set network.loopback=interface
-	uci set network.loopback.ifname=lo
-	uci set network.loopback.proto=static
-	uci set network.loopback.ipaddr=127.0.0.1
-	uci set network.loopback.netmask=255.0.0.0
-	uci set network.globals=globals
-	uci set network.globals.ula_prefix=$ipv6
-	uci set network.bridge=interface
-	uci set network.bridge.type='bridge'
-	uci set network.bridge.ifname="$eth"
-	uci set network.bridge.proto='static'
-	uci set network.bridge.ipaddr=$ipaddr
-	uci set network.bridge.netmask=$netmask
-	uci set network.bridge.gateway=$gateway
-	uci set network.bridge.dns=$gateway
-	uci set network.bridge.force_link='0'
-	uci commit network
-
-	#写入firewall防火墙
-	uci add firewall zone
-	uci set firewall.@zone[0].input=ACCEPT
-	uci set firewall.@zone[0].output=ACCEPT
-	uci set firewall.@zone[0].forward=ACCEPT
-	uci set firewall.@zone[0].conntrack=1
-	uci set firewall.@zone[0].mtu_fix=1
-	uci set firewall.@zone[0].name=bridge
-	uci set firewall.@zone[0].network=bridge
-	uci commit firewall
-
-	#重启网络DNS服务与防火墙
-	/etc/init.d/network reload 2>/dev/null &
-	/etc/init.d/dnsmasq reload 2>/dev/null &
-	/etc/init.d/firewall reload 2>/dev/null &
-
-	fi
-
-	else
-
-	#恢复配置&删除备份
-	if [ -f "/etc/bridge/firewall" ]; then
-	cp /etc/bridge/network /etc/config/network
-	cp /etc/bridge/firewall /etc/config/firewall
-	rm -rf /etc/bridge
-
-	#重启网络DNS服务与防火墙
-	/etc/init.d/network reload 2>/dev/null &
-	/etc/init.d/dnsmasq reload 2>/dev/null &
-	/etc/init.d/firewall reload 2>/dev/null &
-	fi
-
-	fi
-}
-
-ETH()
-{
-	eth=0
-	while [ $eth -le $(expr "$1" - 1) ]
-	do
-	eth=`expr $eth + 1`
-	a=`expr $eth - 1`
-	echo "eth$a"
+ETH() {
+	local n="$1" i=0
+	while [ "$i" -lt "$n" ]; do
+		echo "eth$i"
+		i=$((i + 1))
 	done
 }
 
-start()
-{
+phys_ports() {
+	local network="$1"
+	if [ -z "$network" ] || [ "$network" = "0" ]; then
+		ls /sys/class/net | grep -E '^eth' | sort | tr '\n' ' ' | sed 's/ *$//'
+	else
+		ETH "$network" | tr '\n' ' ' | sed 's/ *$//'
+	fi
+}
+
+reload_services() {
+	/etc/init.d/network reload
+	/etc/init.d/dnsmasq restart
+	/etc/init.d/firewall reload
+}
+
+restore_bridge() {
+	[ -d "$BACKUP" ] || return 0
+
+	[ -f "$BACKUP/network" ]  && cp "$BACKUP/network"  /etc/config/network
+	[ -f "$BACKUP/firewall" ] && cp "$BACKUP/firewall" /etc/config/firewall
+	[ -f "$BACKUP/dhcp" ]     && cp "$BACKUP/dhcp"     /etc/config/dhcp
+	rm -rf "$BACKUP"
+
+	logger -t bridge "restored original network configuration"
+	reload_services
+}
+
+apply_bridge() {
+	local gateway="$1" ipaddr="$2" netmask="$3" network="$4"
+	local ula eth
+
+	ula=$(uci -q get network.globals.ula_prefix)
+
+	eth=$(phys_ports "$network")
+	[ -n "$eth" ] || { logger -t bridge "no physical ports found"; return 1; }
+
+	mkdir -p "$BACKUP"
+	# Copy the originals exactly once. A second enable must not overwrite them
+	# with the already-bridged configuration, otherwise disable could never
+	# restore what the device originally had.
+	if [ ! -f "$BACKUP/firewall" ]; then
+		cp /etc/config/network  "$BACKUP/network"
+		cp /etc/config/firewall "$BACKUP/firewall"
+		cp /etc/config/dhcp     "$BACKUP/dhcp"
+	fi
+
+	uci -q batch <<EOF
+delete network.lan
+delete network.wan
+delete network.wan6
+set network.loopback=interface
+set network.loopback.device='lo'
+set network.loopback.proto='static'
+set network.loopback.ipaddr='127.0.0.1'
+set network.loopback.netmask='255.0.0.0'
+set network.globals=globals
+set network.globals.ula_prefix='$ula'
+set network.bridge=interface
+set network.bridge.type='bridge'
+set network.bridge.ifname='$eth'
+set network.bridge.proto='static'
+set network.bridge.ipaddr='$ipaddr'
+set network.bridge.netmask='$netmask'
+set network.bridge.gateway='$gateway'
+set network.bridge.dns='$gateway'
+set network.bridge.force_link='0'
+commit network
+EOF
+
+	# dnsmasq: drop the DHCP sections that pointed at the interfaces we just
+	# deleted, add one for the bridge so it actually binds there, and pin an
+	# upstream server. Without the explicit upstream the device cannot resolve
+	# anything at all once 'wan' is gone -- resolv.conf.auto is fed by the
+	# interface, and that interface no longer exists.
+	#
+	# ignore='1' because clients must keep getting DHCP from the upstream
+	# router; this device only serves DNS for itself.
+	uci -q batch <<EOF
+delete dhcp.lan
+delete dhcp.wan
+delete dhcp.wan6
+set dhcp.bridge=dhcp
+set dhcp.bridge.interface='bridge'
+set dhcp.bridge.ignore='1'
+set dhcp.@dnsmasq[0].server='$gateway'
+commit dhcp
+EOF
+
+	# Keep the operator's firewall. Bridged traffic is switched at layer 2 by
+	# the kernel bridge and never traverses these zones, so blanking the file
+	# destroyed port forwards and rules for no benefit. Only add the zone the
+	# bridge needs if it is missing.
+	if [ "$(uci -q show firewall | grep -c "\.name='bridge'")" = "0" ]; then
+		uci -q batch <<EOF
+add firewall zone
+set firewall.@zone[-1].name='bridge'
+set firewall.@zone[-1].network='bridge'
+set firewall.@zone[-1].input='ACCEPT'
+set firewall.@zone[-1].output='ACCEPT'
+set firewall.@zone[-1].forward='ACCEPT'
+commit firewall
+EOF
+	fi
+
+	# Remember what was applied so a reload with unchanged settings is a no-op.
+	# The original script used `break` here, which is not valid outside a loop
+	# and silently did nothing -- so every reload rewrote the configuration and
+	# bounced the whole network.
+	printf '%s|%s|%s|%s\n' "$ipaddr" "$netmask" "$gateway" "$eth" > "$BACKUP/param"
+
+	logger -t bridge "transparent bridge enabled on: $eth"
+	reload_services
+}
+
+run_bridge() {
+	local cfg="$1" enabled gateway ipaddr netmask network
+
+	config_get_bool enabled "$cfg" enabled 0
+	config_get gateway "$cfg" gateway
+	config_get ipaddr  "$cfg" ipaddr
+	config_get netmask "$cfg" netmask
+	config_get network "$cfg" network
+
+	if [ "$enabled" != "1" ]; then
+		restore_bridge
+		return 0
+	fi
+
+	if [ -d /sys/class/net/br-bridge ] &&
+	   [ "$(cat "$BACKUP/param" 2>/dev/null)" = "$ipaddr|$netmask|$gateway|$(phys_ports "$network")" ]; then
+		return 0
+	fi
+
+	apply_bridge "$gateway" "$ipaddr" "$netmask" "$network"
+}
+
+start() {
 	config_load bridge
 	config_foreach run_bridge bridge
 }
 
+stop() {
+	restore_bridge
+}
+
+reload() {
+	start
+}
