@@ -5,7 +5,7 @@
 
 基于 [coolsnowwolf/lede](https://github.com/coolsnowwolf/lede)，内核 **6.18.55**。
 
-各版本变更见 [Releases](../../releases)。最新为 **v18**：在线更新新增「取消更新」按钮（下载/校验中可打断），并修复下载超时误判（connect-timeout 20→60，不再在繁忙代理慢连接时误杀）。
+各版本变更见 [Releases](../../releases)。最新为 **v19**：修复在线更新「更新」按钮弹不出确认框（LuCI 26.x handler 参数顺序反了，额外参数应在 event 之前），用 headless Chrome 模拟真人操作验证通过。
 
 ---
 
@@ -14,7 +14,7 @@
 | 项目 | 值 |
 |---|---|
 | 版本标识 | `r8199-cbe28467f` |
-| baked tag | `v18-20261101` |
+| baked tag | `v19-20261101` |
 | LEDE 基线 | `24.10.5` |
 | 内核 | `6.18.55` |
 | 目标 | `x86/64` Generic |

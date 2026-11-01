@@ -312,7 +312,7 @@ return view.extend({
 		});
 	},
 
-	handleDownload: function(ev, check) {
+	handleDownload: function(check, ev) {
 		ev.preventDefault();
 		var view = this;
 
@@ -393,7 +393,7 @@ return view.extend({
 		});
 	},
 
-	handleIgnore: function(ev, tag) {
+	handleIgnore: function(tag, ev) {
 		ev.preventDefault();
 		return run('ignore', [ tag ]).then(function() {
 			ui.addNotification(null, E('p', {}, _('You will not be reminded about %s.').format(tag)), 'info');
@@ -401,7 +401,7 @@ return view.extend({
 		});
 	},
 
-	handleUnignore: function(ev, tag) {
+	handleUnignore: function(tag, ev) {
 		ev.preventDefault();
 		return run('unignore', [ tag ]).then(function() {
 			ui.addNotification(null, E('p', {}, _('Prompt restored for %s.').format(tag)), 'info');
