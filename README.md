@@ -5,7 +5,7 @@
 
 基于 [coolsnowwolf/lede](https://github.com/coolsnowwolf/lede)，内核 **6.18.55**。
 
-各版本变更见 [Releases](../../releases)。最新为 **v19**：修复在线更新「更新」按钮弹不出确认框（LuCI 26.x handler 参数顺序反了，额外参数应在 event 之前），用 headless Chrome 模拟真人操作验证通过。
+各版本变更见 [Releases](../../releases)。最新为 **v20**：透明网桥页面汉化（v17 重写界面后 po 翻译文件未同步，导致中文环境显示英文；已重写 po 并浏览器实测全中文）。
 
 ---
 
@@ -14,7 +14,7 @@
 | 项目 | 值 |
 |---|---|
 | 版本标识 | `r8199-cbe28467f` |
-| baked tag | `v19-20261101` |
+| baked tag | `v20-20261103` |
 | LEDE 基线 | `24.10.5` |
 | 内核 | `6.18.55` |
 | 目标 | `x86/64` Generic |
